@@ -15,7 +15,7 @@ from pathlib import Path
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 BGE_MODEL_NAME = "BAAI/bge-large-zh-v1.5"
-# 本地 DeepSeek（Ollama）默认地址与模型名
+# 本地 Ollama 默认地址与模型名；远程 API 地址和 key 必须通过参数或环境变量提供。
 OLLAMA_BASE_URL = "http://localhost:11434/v1"
 LOCAL_DEEPSEEK_MODEL = "deepseek-r1:14b"  # 可选: deepseek-r1:7b, deepseek-coder:6.7b 等
 
@@ -53,7 +53,7 @@ def _load_vector_store(vector_db_dir: str, embeddings):
 
 
 def _load_llm(model: str = None, base_url: str = None, api_key: str = None, use_local: bool = False):
-    """加载 LLM（默认 DeepSeek API；use_local=True 时走本地 Ollama DeepSeek）。"""
+    """加载 LLM（OpenAI 兼容接口；use_local=True 时走本地 Ollama）。"""
     try:
         from langchain_openai import ChatOpenAI
     except ImportError:
@@ -64,9 +64,18 @@ def _load_llm(model: str = None, base_url: str = None, api_key: str = None, use_
         model = model or os.environ.get("LLM_MODEL", LOCAL_DEEPSEEK_MODEL)
         api_key = api_key or os.environ.get("OPENAI_API_KEY", "not-needed")
     else:
-        model = model or os.environ.get("LLM_MODEL", "deepseek-chat")
-        base_url = base_url or os.environ.get("OPENAI_API_BASE", "https://api.deepseek.com")
-        api_key = api_key or os.environ.get("OPENAI_API_KEY", "not-needed")
+        model = model or os.environ.get("LLM_MODEL")
+        base_url = base_url or os.environ.get("OPENAI_API_BASE")
+        api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        if not model:
+            print("错误：请通过 --model 或环境变量 LLM_MODEL 指定远程模型名。", file=sys.stderr)
+            return None
+        if not base_url:
+            print("错误：请通过 --base-url 或环境变量 OPENAI_API_BASE 指定 OpenAI 兼容 API 地址。", file=sys.stderr)
+            return None
+        if not api_key:
+            print("错误：请通过环境变量 OPENAI_API_KEY 指定 API key。", file=sys.stderr)
+            return None
     return ChatOpenAI(
         model=model,
         base_url=base_url,
@@ -177,7 +186,7 @@ def run_interactive(vector_db: str, model: str = None, base_url: str = None, k: 
     vs = _load_vector_store(vector_db, embeddings)
     if vs is None:
         return 1
-    print("正在加载 LLM…" + ("（本地 DeepSeek）" if use_local else ""))
+    print("正在加载 LLM…" + ("（本地 Ollama）" if use_local else ""))
     llm = _load_llm(model=model, base_url=base_url, use_local=use_local)
     if llm is None:
         return 1
@@ -256,10 +265,10 @@ def main():
     parser = argparse.ArgumentParser(description="PCS7 知识库 AI 问答（RAG + 多轮记忆）")
     parser.add_argument("vector_db", help="Chroma 向量库目录")
     parser.add_argument("-q", "--query", default=None, help="单次问答时的问题（不指定则进入交互模式）")
-    parser.add_argument("-m", "--model", default=None, help="LLM 模型名，默认从 LLM_MODEL 或 deepseek-chat")
+    parser.add_argument("-m", "--model", default=None, help="LLM 模型名；远程模式默认读取 LLM_MODEL")
     parser.add_argument("--base-url", default=None, help="API base URL，如 Ollama: http://localhost:11434/v1")
     parser.add_argument("-k", type=int, default=20, help="检索 top-k 条文档")
-    parser.add_argument("--local", action="store_true", help="使用本地 DeepSeek（Ollama），需先安装 Ollama 并拉取模型")
+    parser.add_argument("--local", action="store_true", help="使用本地 Ollama，需先安装 Ollama 并拉取模型")
     parser.add_argument("--show-chunks", action="store_true", help="回答前打印本轮检索到的 chunk（页码、类型、内容预览）")
     args = parser.parse_args()
 

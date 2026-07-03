@@ -1,5 +1,7 @@
 # Long Document RAG Assistant
 
+Agent for Archive is a local long-document RAG assistant for PDF-based question answering. It extracts paragraphs, tables, and optional figures from PDFs, cleans and chunks the content, stores embeddings in Chroma, and answers questions with OpenAI-compatible LLMs through LangChain.
+
 一个面向长文档的本地 RAG 问答工具。它可以从 PDF 中提取段落、表格和可选图片，清洗并切分文本，写入 Chroma 向量库，然后通过 LangChain 和 OpenAI 兼容模型进行基于文档的问答。
 
 ## Features
@@ -13,6 +15,14 @@
 - 历史感知检索：可把“它”“这个”等追问改写成完整问题后再检索。
 - 可打印检索到的 chunk，便于调试 embedding 和召回效果。
 - Prompt 模板独立在 `prompt_template.py` 中，便于修改成不同领域的长文档解析助手。
+
+## Use Cases
+
+- Technical manuals and engineering documents
+- Academic papers and reports
+- Long PDF archives
+- Course materials and project documentation
+- Internal knowledge-base documents
 
 ## Project Structure
 
@@ -46,16 +56,20 @@ pip install -r requirements.txt
 HF_ENDPOINT=https://hf-mirror.com
 ```
 
+The first run may download the `BAAI/bge-large-zh-v1.5` embedding model. Make sure that HuggingFace access or the configured mirror is available.
+
+首次运行时可能会下载 `BAAI/bge-large-zh-v1.5` embedding 模型，请确保 HuggingFace 或镜像站点可访问。
+
 ## Configuration
 
-默认使用 OpenAI 兼容接口。可以使用 DeepSeek、OpenAI、Ollama 或其他兼容服务。
+默认使用 OpenAI 兼容接口。远程服务的 API 地址、模型名和 API key 都需要通过环境变量或命令行参数提供。
 
-DeepSeek 示例：
+远程 API 示例：
 
 ```bash
-export OPENAI_API_KEY=sk-xxx
-export OPENAI_API_BASE=https://api.deepseek.com
-export LLM_MODEL=deepseek-chat
+export OPENAI_API_KEY=your-api-key
+export OPENAI_API_BASE=https://your-openai-compatible-endpoint/v1
+export LLM_MODEL=your-model-name
 ```
 
 本地 Ollama 示例：
@@ -68,12 +82,29 @@ python ai_qa.py chroma_db --local
 Windows PowerShell 示例：
 
 ```powershell
-$env:OPENAI_API_KEY="sk-xxx"
-$env:OPENAI_API_BASE="https://api.deepseek.com"
-$env:LLM_MODEL="deepseek-chat"
+$env:OPENAI_API_KEY="your-api-key"
+$env:OPENAI_API_BASE="https://your-openai-compatible-endpoint/v1"
+$env:LLM_MODEL="your-model-name"
 ```
 
+You can also keep API settings in a `.env` file:
+
+```env
+OPENAI_API_KEY=your-api-key
+OPENAI_API_BASE=https://your-openai-compatible-endpoint/v1
+LLM_MODEL=your-model-name
+```
+
+当前脚本不会自动加载 `.env`，请先用你的 shell、`direnv` 或其他环境变量工具加载后再运行。`.env` 已被 `.gitignore` 忽略，避免误提交密钥。
+
 ## Quick Start
+
+Minimal workflow:
+
+```bash
+python pdf_processor.py document.pdf --vector-db chroma_db -o result.txt
+python ai_qa.py chroma_db -q "请总结这份文档的核心内容"
+```
 
 ### 1. Process a PDF
 
@@ -152,6 +183,24 @@ python extract_answer_times.py answers.txt --stats --csv answer_times.csv
 
 ## How It Works
 
+```text
+PDF
+ ↓
+PyMuPDF extraction
+ ↓
+Text cleaning
+ ↓
+Chunking
+ ↓
+BGE embedding
+ ↓
+Chroma vector store
+ ↓
+Retriever
+ ↓
+LLM answer with page references
+```
+
 1. `pdf_processor.py` 使用 PyMuPDF 提取 PDF 文本和表格。
 2. `text_cleaning.py` 清洗文本，减少页眉页脚、碎片和异常换行。
 3. 文档被切分为适合 RAG 的 chunks。
@@ -172,6 +221,22 @@ python extract_answer_times.py answers.txt --stats --csv answer_times.csv
 - 回答需要标注来源页码；
 - 长文总结应按主题、章节或逻辑层次组织。
 
+## Retrieval Debugging
+
+Use `--show-chunks` or `query_probe.py` to inspect retrieved chunks before trusting an answer. This is useful for diagnosing chunking issues, embedding mismatch, and poor recall.
+
+```bash
+python ai_qa.py chroma_db --show-chunks
+python query_probe.py chroma_db "文档的主要结论是什么？" -k 5
+```
+
+## Limitations
+
+- The assistant is only as reliable as the retrieved chunks. Poor chunking or weak retrieval can lead to incomplete answers.
+- Scanned PDFs require extractable text or OCR handled before ingestion; this project currently focuses on PyMuPDF-based extraction.
+- Very large documents may require tuning `--chunk-size`, `--chunk-overlap`, and `-k`.
+- API availability, rate limits, and model behavior depend on the OpenAI-compatible provider you configure.
+
 ## Generated Files
 
 以下文件或目录通常是运行产物，不建议提交到 Git：
@@ -185,6 +250,10 @@ python extract_answer_times.py answers.txt --stats --csv answer_times.csv
 - `.env`
 
 `.gitignore` 已默认忽略这些内容。
+
+## Acknowledgement
+
+This project uses PyMuPDF for PDF parsing, Chroma for vector storage, BGE embeddings for retrieval, and LangChain for RAG orchestration.
 
 ## License
 

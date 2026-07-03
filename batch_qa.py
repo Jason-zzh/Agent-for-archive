@@ -42,7 +42,7 @@ def main():
     parser.add_argument("-m", "--model", default=None, help="LLM 模型名")
     parser.add_argument("--base-url", default=None, help="API base URL")
     parser.add_argument("-k", type=int, default=20, help="检索 top-k，默认 20")
-    parser.add_argument("--local", action="store_true", help="使用本地 Ollama DeepSeek")
+    parser.add_argument("--local", action="store_true", help="使用本地 Ollama")
     parser.add_argument("--show-chunks", action="store_true", help="每题回答前在控制台打印检索 chunk（不写入输出文件）")
     parser.add_argument(
         "--sleep",
