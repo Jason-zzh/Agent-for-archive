@@ -237,20 +237,6 @@ python query_probe.py chroma_db "文档的主要结论是什么？" -k 5
 - Very large documents may require tuning `--chunk-size`, `--chunk-overlap`, and `-k`.
 - API availability, rate limits, and model behavior depend on the OpenAI-compatible provider you configure.
 
-## Generated Files
-
-以下文件或目录通常是运行产物，不建议提交到 Git：
-
-- `chroma_db/`
-- `image/`
-- `answers.txt`
-- `result.txt`
-- `result_raw.txt`
-- `answer_times.csv`
-- `.env`
-
-`.gitignore` 已默认忽略这些内容。
-
 ## Acknowledgement
 
 This project uses PyMuPDF for PDF parsing, Chroma for vector storage, BGE embeddings for retrieval, and LangChain for RAG orchestration.
