@@ -1,0 +1,16 @@
+# PDF processing and image extraction
+Pillow>=10.0.0
+pymupdf>=1.24.0
+
+# Vectorization and Chroma store
+huggingface-hub>=1.4.1,<2.0
+langchain-huggingface>=0.1.0
+langchain-community>=0.3.0
+sentence-transformers>=2.2.0
+chromadb>=0.4.0
+
+# LangChain RAG pipeline
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-text-splitters>=0.3.0
+langchain-openai>=0.2.0
