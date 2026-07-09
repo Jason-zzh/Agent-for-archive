@@ -16,7 +16,7 @@
   # 解析 + 文本清洗 + 智能切片 + 向量化入库（供 ai_qa / query_probe 使用）
   python pdf_processor.py 文档.pdf --vector-db chroma_db -o result.txt
 
-  # 同时提取带 caption 的内嵌图片到 image 目录
+  # 同时按页面显示效果裁剪带 caption 的图片到 image 目录
   python pdf_processor.py 文档.pdf --raw-images -i image -o result.txt
 
   # 不做清洗、不做切片（仅段落/表格级提取）
@@ -84,18 +84,76 @@ def _bbox_inside_any(block_bbox, table_rects: list, tol: float = 2.0) -> bool:
     return False
 
 
-def _extract_paragraphs_and_tables_pymupdf(pdf_path: Path) -> list[tuple[str, int, str]]:
+def _rect_to_bbox(rect) -> tuple[float, float, float, float] | None:
+    """把 PyMuPDF Rect 或 bbox tuple 转成普通 float tuple。"""
+    if rect is None:
+        return None
+    try:
+        return (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1))
+    except AttributeError:
+        try:
+            if len(rect) < 4:
+                return None
+            return (float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
+        except (TypeError, ValueError):
+            return None
+
+
+def _format_bbox(bbox: tuple[float, float, float, float] | None) -> str:
+    """把 bbox 格式化为 Chroma metadata 友好的字符串。"""
+    if bbox is None:
+        return ""
+    return ",".join(f"{value:.2f}" for value in bbox)
+
+
+def _build_layout_metadata(
+    *,
+    page_number: int,
+    category: str,
+    bbox: tuple[float, float, float, float] | None,
+    reading_order: int,
+    page_width: float,
+    page_height: float,
+) -> dict:
+    """生成文本/表格 chunk 的版面 metadata，字段保持 Chroma 可持久化的基础类型。"""
+    meta = {
+        "page_number": page_number,
+        "category": category,
+        "modality": "text",
+        "image_path": "",
+        "bbox": _format_bbox(bbox),
+        "reading_order": int(reading_order),
+        "page_width": float(page_width),
+        "page_height": float(page_height),
+        "nearby_image_paths": "",
+    }
+    if bbox is not None:
+        x0, y0, x1, y1 = bbox
+        meta.update({
+            "bbox_x0": float(x0),
+            "bbox_y0": float(y0),
+            "bbox_x1": float(x1),
+            "bbox_y1": float(y1),
+        })
+    return meta
+
+
+def _extract_paragraphs_and_tables_pymupdf(pdf_path: Path) -> list[tuple[str, dict]]:
     """用 PyMuPDF 提取段落与表格，按页面内垂直位置排序。落在表格区域内的文字不再单独输出，避免重复。"""
     try:
         import fitz
     except ImportError:
         print("请先安装 PyMuPDF: pip install pymupdf", file=sys.stderr)
         return []
-    items: list[tuple[float, int, str, str]] = []  # (y0, page_no, content, category)
+    items: list[tuple[int, int, float, str, dict]] = []  # (page_no, order, y0, content, metadata)
     with fitz.open(str(pdf_path)) as doc:
         for page_idx in range(len(doc)):
             page = doc[page_idx]
             page_no = page_idx + 1
+            page_rect = page.rect
+            page_width = float(page_rect.width)
+            page_height = float(page_rect.height)
+            page_items: list[tuple[float, str, str, tuple[float, float, float, float] | None]] = []
             # 先收集本页所有表格的 bbox，用于过滤重复的段落
             table_rects: list = []
             try:
@@ -122,7 +180,7 @@ def _extract_paragraphs_and_tables_pymupdf(pdf_path: Path) -> list[tuple[str, in
                             parts.append(t)
                 text = " ".join(parts).strip()
                 if text:
-                    items.append((y0, page_no, text, "Paragraph"))
+                    page_items.append((y0, text, "Paragraph", _rect_to_bbox(bbox)))
             try:
                 finder = page.find_tables()
                 for table in finder:
@@ -133,13 +191,24 @@ def _extract_paragraphs_and_tables_pymupdf(pdf_path: Path) -> list[tuple[str, in
                             if md:
                                 bbox = getattr(table, "bbox", None) or getattr(table, "rect", None)
                                 ty = bbox[1] if bbox and len(bbox) >= 2 else 0.0
-                                items.append((ty, page_no, md, "Table"))
+                                page_items.append((ty, md, "Table", _rect_to_bbox(bbox)))
                     except Exception:
                         continue
             except AttributeError:
                 pass
-    items.sort(key=lambda x: (x[1], x[0]))
-    return [(content, page_no, category) for _, page_no, content, category in items]
+            page_items.sort(key=lambda x: x[0])
+            for reading_order, (y0, content, category, bbox) in enumerate(page_items, 1):
+                meta = _build_layout_metadata(
+                    page_number=page_no,
+                    category=category,
+                    bbox=bbox,
+                    reading_order=reading_order,
+                    page_width=page_width,
+                    page_height=page_height,
+                )
+                items.append((page_no, reading_order, y0, content, meta))
+    items.sort(key=lambda x: (x[0], x[1], x[2]))
+    return [(content, meta) for _, _, _, content, meta in items]
 
 
 def _caption_below_rect(page, img_rect, text_blocks, max_gap: float = 80) -> str:
@@ -174,18 +243,30 @@ def _caption_below_rect(page, img_rect, text_blocks, max_gap: float = 80) -> str
     return best_text
 
 
-def _extract_raw_images_pymupdf(pdf_path: Path, image_dir: Path, use_caption: bool = True) -> int:
-    """用 PyMuPDF (fitz) 提取 PDF 内嵌的原始图片，经 Pillow 解码后统一保存为 PNG；仅保存能匹配到 caption（图下方文本）的图，无 caption 的图不保存。"""
-    import io
+def _render_image_region(page, img_rect, out_path: Path, zoom: float = 2.0) -> bool:
+    """按 PDF 页面显示效果裁剪渲染图片区域，避免原始图片方向/镜像与页面显示不一致。"""
+    import fitz
+
+    clip = img_rect & page.rect
+    if clip.is_empty or clip.width < 5 or clip.height < 5:
+        return False
+    matrix = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=matrix, clip=clip, alpha=False)
+    pix.save(str(out_path))
+    return True
+
+
+def _extract_raw_images_pymupdf(
+    pdf_path: Path,
+    image_dir: Path,
+    use_caption: bool = True,
+    render_zoom: float = 2.0,
+) -> int:
+    """按页面显示效果裁剪渲染 PDF 图片区域；仅保存能匹配到 caption 的图，无 caption 的图不保存。"""
     try:
         import fitz
     except ImportError:
         print("请先安装 PyMuPDF: pip install pymupdf", file=sys.stderr)
-        return 0
-    try:
-        from PIL import Image as PILImage
-    except ImportError:
-        print("请先安装 Pillow: pip install Pillow", file=sys.stderr)
         return 0
     image_dir.mkdir(parents=True, exist_ok=True)
     saved = 0
@@ -200,41 +281,36 @@ def _extract_raw_images_pymupdf(pdf_path: Path, image_dir: Path, use_caption: bo
             for img_idx, img_info in enumerate(image_list):
                 xref = img_info[0]
                 try:
-                    base_image = doc.extract_image(xref)
+                    rects = page.get_image_rects(xref)
                 except Exception:
                     continue
-                image_bytes = base_image["image"]
-                base_name = None
-                if use_caption and text_blocks:
-                    try:
-                        rects = page.get_image_rects(xref)
-                        if rects:
-                            caption = _caption_below_rect(page, rects[0], text_blocks)
-                            if caption:
-                                base_name = _sanitize_filename_for_caption(caption)
-                                if len(base_name) < 4:
-                                    base_name = None
-                    except Exception:
-                        pass
-                if not base_name:
+                if not rects:
                     continue
-                if base_name in used_names:
-                    base_name = f"{base_name}_{img_idx + 1}"
-                used_names.add(base_name)
-                name = f"{base_name}.png"
-                if len(name) > 200:
-                    base_name = base_name[: 195]
+                for rect_idx, rect in enumerate(rects, 1):
+                    base_name = None
+                    if use_caption and text_blocks:
+                        caption = _caption_below_rect(page, rect, text_blocks)
+                        if caption:
+                            base_name = _sanitize_filename_for_caption(caption)
+                            if len(base_name) < 4:
+                                base_name = None
+                    if not base_name:
+                        continue
+                    if len(rects) > 1:
+                        base_name = f"{base_name}_{rect_idx}"
+                    if base_name in used_names:
+                        base_name = f"{base_name}_{img_idx + 1}"
+                    used_names.add(base_name)
                     name = f"{base_name}.png"
-                out_path = page_dir / name
-                try:
-                    img = PILImage.open(io.BytesIO(image_bytes))
-                    if img.mode in ("RGBA", "P"):
-                        img.save(out_path, "PNG")
-                    else:
-                        img.save(out_path, "PNG")
-                    saved += 1
-                except Exception as e:
-                    print(f"警告：保存 {out_path} 失败: {e}", file=sys.stderr)
+                    if len(name) > 200:
+                        base_name = base_name[: 195]
+                        name = f"{base_name}.png"
+                    out_path = page_dir / name
+                    try:
+                        if _render_image_region(page, rect, out_path, zoom=render_zoom):
+                            saved += 1
+                    except Exception as e:
+                        print(f"警告：保存 {out_path} 失败: {e}", file=sys.stderr)
     return saved
 
 
@@ -347,6 +423,7 @@ def process_pdf(
     max_display_chars: int = 500,
     save_images_dir: str | None = None,
     extract_raw_images: bool = False,
+    image_render_zoom: float = 2.0,
     do_clean: bool = True,
     do_chunk: bool = True,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
@@ -366,8 +443,8 @@ def process_pdf(
             print("错误：使用 --raw-images 时请指定 -i/--save-images 目录", file=sys.stderr)
             sys.exit(1)
         image_dir = Path(save_images_dir)
-        n = _extract_raw_images_pymupdf(path, image_dir)
-        print(f"已用 PyMuPDF 提取 {n} 张原始图片到: {image_dir}")
+        n = _extract_raw_images_pymupdf(path, image_dir, render_zoom=image_render_zoom)
+        print(f"已用 PyMuPDF 按页面显示效果裁剪 {n} 张图片到: {image_dir}")
         save_images_dir = None
 
     if save_images_dir and not extract_raw_images:
@@ -389,8 +466,8 @@ def process_pdf(
 
     items = _extract_paragraphs_and_tables_pymupdf(path)
     docs = [
-        Document(page_content=content, metadata={"page_number": p, "category": cat})
-        for content, p, cat in items
+        Document(page_content=content, metadata=metadata)
+        for content, metadata in items
     ]
 
     if not docs:
@@ -484,7 +561,14 @@ def main():
     parser.add_argument(
         "--raw-images",
         action="store_true",
-        help="用 PyMuPDF 提取 PDF 内嵌的原始图片到 -i 目录（需同时指定 -i）",
+        help="用 PyMuPDF 按页面显示效果裁剪 PDF 图片到 -i 目录（需同时指定 -i）",
+    )
+    parser.add_argument(
+        "--image-render-zoom",
+        type=float,
+        default=2.0,
+        metavar="N",
+        help="--raw-images 渲染裁剪图片时的缩放倍数（默认 2.0，越大越清晰但文件越大）",
     )
     parser.add_argument(
         "--no-clean",
@@ -531,6 +615,7 @@ def main():
         output_file=args.output,
         save_images_dir=args.save_images,
         extract_raw_images=args.raw_images,
+        image_render_zoom=args.image_render_zoom,
         do_clean=not args.no_clean,
         do_chunk=not args.no_chunk,
         chunk_size=args.chunk_size,
