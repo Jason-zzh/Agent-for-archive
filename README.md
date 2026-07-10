@@ -32,6 +32,8 @@ Agent for Archive is a local long-document RAG assistant for PDF-based question 
 ├── batch_qa.py                 # 批量问答：读取问题文件并输出 answers.txt
 ├── extract_answer_times.py     # 从批量问答结果中提取每题耗时
 ├── filter_short_name_images.py # 过滤图片目录中的短文件名图片路径
+├── image_captioner.py          # Phase 1：调用视觉模型生成图片 caption JSONL
+├── multimodal_ingest.py        # Phase 2：将图片 caption 写入 Chroma，支持图文检索
 ├── pdf_processor.py            # PDF 解析、清洗、切片、向量化入库
 ├── prompt_template.py          # 通用长文档解析 prompt 模板
 ├── query_probe.py              # 检索探针：查看某个问题召回了哪些 chunk
@@ -106,6 +108,14 @@ python pdf_processor.py document.pdf --vector-db chroma_db -o result.txt
 python ai_qa.py chroma_db -q "请总结这份文档的核心内容"
 ```
 
+With image captions:
+
+```bash
+python image_captioner.py image -o image_captions.jsonl
+python multimodal_ingest.py image_captions.jsonl --vector-db chroma_db
+python ai_qa.py chroma_db -q "文档中的关键界面截图说明了什么？"
+```
+
 ### 1. Process a PDF
 
 仅解析并输出到控制台：
@@ -152,6 +162,8 @@ python ai_qa.py chroma_db
 python ai_qa.py chroma_db --show-chunks
 ```
 
+多模态 QA 会把每条检索结果以来源块形式注入模型，包含页码、类型、模态和图片路径。引用图片证据时，回答应同时给出图片路径。
+
 ### 3. Probe Retrieval Quality
 
 `query_probe.py` 用于检查某个问题会召回哪些文档片段，适合调试 embedding、chunk 切分和检索效果。
@@ -160,7 +172,30 @@ python ai_qa.py chroma_db --show-chunks
 python query_probe.py chroma_db "文档的主要结论是什么？" -k 5
 ```
 
-### 4. Batch QA
+多模态入库后，探针结果会同时展示页码、chunk 类型、模态和图片路径，便于确认问题是否召回了 `FigureCaption`：
+
+```text
+#1  距离=0.3201  页=13  类型=FigureCaption  模态=image  顺序=4
+    bbox=120.50,88.00,420.00,260.25
+    图片路径=image/p13/system_architecture.png
+    【图片内容】...
+```
+
+### 4. Ingest Image Captions
+
+如果已经通过 `image_captioner.py` 生成了 `image_captions.jsonl`，可以把图片说明追加写入同一个 Chroma collection：
+
+```bash
+python multimodal_ingest.py image_captions.jsonl --vector-db chroma_db
+```
+
+先预览不入库：
+
+```bash
+python multimodal_ingest.py image_captions.jsonl --dry-run --limit 5
+```
+
+### 5. Batch QA
 
 准备一个问题文件，每行一个问题：
 
@@ -204,11 +239,14 @@ LLM answer with page references
 1. `pdf_processor.py` 使用 PyMuPDF 提取 PDF 文本和表格。
 2. `text_cleaning.py` 清洗文本，减少页眉页脚、碎片和异常换行。
 3. 文档被切分为适合 RAG 的 chunks。
-4. chunks 使用 BGE embedding 转成向量并写入 Chroma。
-5. `ai_qa.py` 接收问题后，先在多轮对话中把追问改写成完整问题。
-6. Chroma 检索 top-k 相关 chunks。
-7. 检索到的 chunks 连同页码一起注入 prompt。
-8. LLM 只基于参考文档回答，并按模板要求标注页码或拒答。
+4. 文本和表格 chunk 保留版面 metadata，包括 `bbox`、`reading_order`、`page_width` 和 `page_height`。
+5. chunks 使用 BGE embedding 转成向量并写入 Chroma。
+6. `ai_qa.py` 接收问题后，先在多轮对话中把追问改写成完整问题。
+7. Chroma 检索 top-k 相关 chunks。
+8. 检索到的 chunks 连同页码、类型、模态和图片路径一起注入 prompt。
+9. LLM 只基于参考文档回答，并按模板要求标注页码、图片证据或拒答。
+
+Layout metadata uses Chroma-safe primitive values. For example, `bbox` is stored as a comma-separated string, while `bbox_x0`, `bbox_y0`, `bbox_x1`, and `bbox_y1` are also stored as numeric fields for future filtering or layout-aware ranking.
 
 ## Prompt Customization
 

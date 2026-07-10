@@ -16,6 +16,22 @@ os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 BGE_MODEL_NAME = "BAAI/bge-large-zh-v1.5"
 
 
+def _normalize_metadata(meta: dict) -> dict:
+    """补齐多模态检索调试需要展示的 metadata。"""
+    meta = dict(meta or {})
+    if "page_label" not in meta:
+        meta["page_label"] = str(meta.get("page_number", "?"))
+    if "category" not in meta:
+        meta["category"] = "Paragraph"
+    if "modality" not in meta:
+        meta["modality"] = "image" if meta.get("image_path") else "text"
+    if "image_path" not in meta:
+        meta["image_path"] = ""
+    if "bbox" not in meta:
+        meta["bbox"] = ""
+    return meta
+
+
 def _load_vector_store(vector_db_dir: str):
     """加载 Chroma 与 BGE Embedding，返回 LangChain VectorStore。"""
     try:
@@ -46,14 +62,25 @@ def _load_vector_store(vector_db_dir: str):
 
 def _format_result(rank: int, score: float, doc, max_content: int = 400):
     """单条检索结果格式化为可读字符串。Chroma 返回的 score 为 L2 距离，越小越相似。"""
-    meta = (doc.metadata or {}) if hasattr(doc, "metadata") else {}
+    meta = _normalize_metadata((doc.metadata or {}) if hasattr(doc, "metadata") else {})
     page = meta.get("page_label") or meta.get("page_number", "?")
     cat = meta.get("category", "?")
+    modality = meta.get("modality", "?")
+    image_path = meta.get("image_path") or ""
+    reading_order = meta.get("reading_order")
+    bbox = meta.get("bbox") or ""
     content = (doc.page_content or "") if hasattr(doc, "page_content") else str(doc)
     if len(content) > max_content:
         content = content[:max_content].rstrip() + "…"
     content = content.replace("\n", " ").strip()
-    return f"  #{rank}  距离={score:.4f}  页={page}  类型={cat}\n    {content}"
+    header = f"  #{rank}  距离={score:.4f}  页={page}  类型={cat}  模态={modality}"
+    if reading_order is not None:
+        header += f"  顺序={reading_order}"
+    if bbox:
+        header += f"\n      bbox={bbox}"
+    if image_path:
+        header += f"\n      图片路径={image_path}"
+    return f"{header}\n    {content}"
 
 
 def run_queries(vector_store, queries: list[str], k: int = 5, max_content: int = 400):

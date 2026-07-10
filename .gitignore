@@ -22,6 +22,7 @@ answers.txt
 result.txt
 result_raw.txt
 answer_times.csv
+image_captions.jsonl
 *.log
 
 # OS/editor files

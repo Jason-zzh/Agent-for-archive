@@ -18,6 +18,14 @@ BGE_MODEL_NAME = "BAAI/bge-large-zh-v1.5"
 # 本地 Ollama 默认地址与模型名；远程 API 地址和 key 必须通过参数或环境变量提供。
 OLLAMA_BASE_URL = "http://localhost:11434/v1"
 LOCAL_DEEPSEEK_MODEL = "deepseek-r1:14b"  # 可选: deepseek-r1:7b, deepseek-coder:6.7b 等
+MULTIMODAL_DOCUMENT_PROMPT_TEMPLATE = (
+    "【来源】\n"
+    "页码: {page_label}\n"
+    "类型: {category}\n"
+    "模态: {modality}\n"
+    "图片路径: {image_path}\n\n"
+    "{page_content}"
+)
 
 
 def _load_embeddings():
@@ -87,13 +95,40 @@ def _load_llm(model: str = None, base_url: str = None, api_key: str = None, use_
 
 
 def _normalize_retrieved_docs(docs):
-    """为检索到的每条文档补全 page_label（与入库逻辑一致）。"""
+    """为检索到的每条文档补全 QA 所需的多模态 metadata。"""
     for d in docs:
         m = dict(getattr(d, "metadata", None) or {})
         if "page_label" not in m:
             m["page_label"] = str(m.get("page_number", "?"))
+        if "category" not in m:
+            m["category"] = "Paragraph"
+        if "image_path" not in m:
+            m["image_path"] = ""
+        if "modality" not in m:
+            m["modality"] = "image" if m.get("image_path") else "text"
         d.metadata = m
     return docs
+
+
+def _format_document_for_prompt(doc) -> str:
+    """把单条检索结果格式化为多模态来源块，便于测试和人工调试。"""
+    meta = dict(getattr(doc, "metadata", None) or {})
+    if "page_label" not in meta:
+        meta["page_label"] = str(meta.get("page_number", "?"))
+    if "category" not in meta:
+        meta["category"] = "Paragraph"
+    if "image_path" not in meta:
+        meta["image_path"] = ""
+    if "modality" not in meta:
+        meta["modality"] = "image" if meta.get("image_path") else "text"
+    content = (getattr(doc, "page_content", None) or "").strip()
+    return MULTIMODAL_DOCUMENT_PROMPT_TEMPLATE.format(
+        page_label=meta.get("page_label", "?"),
+        category=meta.get("category", "Paragraph"),
+        modality=meta.get("modality", "text"),
+        image_path=meta.get("image_path", ""),
+        page_content=content,
+    )
 
 
 def _print_chunks(docs, max_chars: int = 400):
@@ -104,11 +139,16 @@ def _print_chunks(docs, max_chars: int = 400):
         meta = getattr(d, "metadata", None) or {}
         page = meta.get("page_label") or meta.get("page_number", "?")
         cat = meta.get("category", "?")
+        modality = meta.get("modality", "?")
+        image_path = meta.get("image_path") or ""
         text = (getattr(d, "page_content", None) or "").strip()
         if len(text) > max_chars:
             text = text[:max_chars].rstrip() + "…"
         text = text.replace("\n", " ")
-        print(f"{sep}\n  #{i}  页={page}  类型={cat}\n  {text}")
+        line = f"{sep}\n  #{i}  页={page}  类型={cat}  模态={modality}"
+        if image_path:
+            line += f"\n      图片路径={image_path}"
+        print(f"{line}\n  {text}")
     print(sep + "\n")
 
 
@@ -151,8 +191,8 @@ def _build_chain(vector_store, llm, k: int = 5):
         MessagesPlaceholder(variable_name="chat_history"),
         ("human", USER_TURN_REMINDER + "{input}"),
     ])
-    # 每条文档带页码前缀；跨页时用 page_label（如 "5,6,7"），否则用 page_number
-    document_prompt = PromptTemplate.from_template("【页码 {page_label}】\n{page_content}")
+    # 每条文档带多模态来源信息，避免模型把文本、表格、图片 caption 混为一类证据。
+    document_prompt = PromptTemplate.from_template(MULTIMODAL_DOCUMENT_PROMPT_TEMPLATE)
     combine_docs_chain = create_stuff_documents_chain(
         llm, qa_prompt, document_prompt=document_prompt
     )
@@ -199,7 +239,7 @@ def run_interactive(vector_db: str, model: str = None, base_url: str = None, k: 
 
     memory = ChatMessageHistory()
     print("\n" + "=" * 60)
-    print("PCS7 知识库问答（多轮对话，输入 quit/exit 退出）")
+    print("知识库问答（多轮对话，输入 quit/exit 退出）")
     if show_chunks:
         print("（已开启：每次回答前显示检索到的 chunk）")
     print("=" * 60)
